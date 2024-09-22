@@ -1,6 +1,7 @@
 package d1
 
 import (
+	"context"
 	nurl "net/url"
 
 	"errors"
@@ -37,12 +38,16 @@ func (conn *Connection) Close() {
 func (conn *Connection) init(dsn string) error {
 	// do some sanity checks.  You know users.
 
+	if len(dsn) == 0 {
+		return ErrEmptyDSN
+	}
+
 	if len(dsn) < 7 {
-		return errors.New("dsn specified is impossibly short")
+		return ErrShortDSN
 	}
 
 	if !strings.HasPrefix(dsn, "d1") {
-		return errors.New("dsn does not start with 'd1'")
+		return ErrNotD1
 	}
 
 	u, err := nurl.Parse(dsn)
@@ -70,7 +75,7 @@ func (conn *Connection) init(dsn string) error {
 	}
 
 	if u.Host == "" || len(u.Host) != 36 {
-		return errors.New("invalid database id")
+		return ErrInvalidDB
 	}
 	conn.databaseId = u.Host
 
@@ -96,5 +101,6 @@ func (conn *Connection) init(dsn string) error {
 	Trace("%s:    %s -> %s", conn.ID, "apiToken", conn.apiToken)
 	Trace("%s:    %s -> %s", conn.ID, "databaseId", conn.databaseId)
 
-	return nil
+	// verify connection
+	return conn.VerifyApiTokenContext(context.Background())
 }

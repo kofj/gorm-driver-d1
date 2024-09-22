@@ -17,6 +17,7 @@ type apiOps int
 const (
 	api_LIST apiOps = iota
 	api_QUERY
+	API_TOKEN
 )
 
 type D1RespMessage struct {
@@ -72,19 +73,21 @@ type ParameterizedStatement struct {
 	Params []interface{} `json:"params"`
 }
 
-func (c *Connection) apiOpsToEndpoint(apiOps apiOps) string {
+func (c *Connection) apiOpsToEndpoint(apiOps apiOps, account string) string {
 	switch apiOps {
 	case api_LIST:
-		return "/d1/database"
+		return "/accounts/" + account + "/d1/database"
 	case api_QUERY:
-		return "/d1/database/" + c.databaseId + "/raw"
+		return "/accounts/" + account + "/d1/database/" + c.databaseId + "/raw"
+	case API_TOKEN:
+		return "/user/tokens/verify"
 	default:
 		return ""
 	}
 }
 
 func (c *Connection) d1ApiCall(ctx context.Context, apiOps apiOps, method string, reqBody []byte) (respBody []byte, auditlogId string, duration time.Duration, err error) {
-	var endpoint = c.apiOpsToEndpoint(apiOps)
+	var endpoint = c.apiOpsToEndpoint(apiOps, c.accountId)
 	if endpoint == "" {
 		err = ErrInvalidAPI
 		return
@@ -93,7 +96,7 @@ func (c *Connection) d1ApiCall(ctx context.Context, apiOps apiOps, method string
 	if reqBody != nil {
 		bodyReader = bytes.NewBuffer(reqBody)
 	}
-	var api = fmt.Sprintf("%s/accounts/%s%s", v4base, c.accountId, endpoint)
+	var api = fmt.Sprintf("%s%s", v4base, endpoint)
 	req, err := http.NewRequestWithContext(ctx, method, api, bodyReader)
 	if err != nil {
 		return
@@ -120,7 +123,13 @@ func (c *Connection) d1ApiCall(ctx context.Context, apiOps apiOps, method string
 		return
 	}
 
-	Trace("%s: client.Do(%s) OK, status: %d, body: %s", req.URL, c.ID, resp.StatusCode, respBody)
+	if resp.StatusCode != http.StatusOK {
+		err = fmt.Errorf("http status: %d, body: %s", resp.StatusCode, respBody)
+		Trace("%s: client.Do(%d) failed: %s", c.ID, resp.StatusCode, err)
+		return
+	}
+
+	Trace("%s: client.Do(%s) OK, status: %d, body: %s", c.ID, req.URL, resp.StatusCode, respBody)
 
 	return
 }
@@ -178,5 +187,21 @@ func (c *Connection) WriteParameterizedContext(ctx context.Context, stmt Paramet
 		return
 	}
 
+	return
+}
+
+func (c *Connection) VerifyApiTokenContext(ctx context.Context) (err error) {
+	if c.hasBeenClosed {
+		return ErrClosed
+	}
+
+	Trace("%s: VerifyApiToken()", c.ID)
+
+	_, auditlogId, duration, err := c.d1ApiCall(ctx, API_TOKEN, "GET", nil)
+	if err != nil {
+		Trace("%s: d1ApiCall() failed: %s, duration: %s", c.ID, err, duration)
+		return
+	}
+	Trace("%s: d1ApiCall() OK, duration: %s, auditlogId: %s", c.ID, duration, auditlogId)
 	return
 }

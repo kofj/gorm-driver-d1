@@ -11,11 +11,15 @@ import (
 )
 
 const DriverName = "d1"
-const v4base = "https://api.cloudflare.com/client/v4/"
+const v4base = "https://api.cloudflare.com/client/v4"
 
 var (
 	ErrInvalidAPI = errors.New("invalid api")
 	ErrClosed     = errors.New("d1: connection is closed")
+	ErrEmptyDSN   = errors.New("dsn is empty")
+	ErrShortDSN   = errors.New("dsn specified is impossibly short")
+	ErrNotD1      = errors.New("dsn does not start with 'd1'")
+	ErrInvalidDB  = errors.New("invalid database id")
 )
 
 // Open opens a new connection to the database.
@@ -35,7 +39,7 @@ func Open(dsn string) (conn *Connection, err error) {
 	// set defaults
 	conn.hasBeenClosed = false
 	err = conn.init(dsn)
-	Trace("%s: Open() called for dsn: %s", conn.ID, dsn)
+	Trace("%s: Open() called for dsn: %s, err: %v", conn.ID, dsn, err)
 
 	return
 }
