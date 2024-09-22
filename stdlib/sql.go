@@ -6,10 +6,18 @@ import (
 	"database/sql/driver"
 	"errors"
 	"io"
+	"math"
+	"slices"
+	"strings"
+	"time"
 
 	d1 "github.com/kofj/gorm-driver-d1"
-	"github.com/tidwall/gjson"
 )
+
+var defaultTimeFields = []string{
+	"created_at", "updated_at", "deleted_at",
+	"creation_time", "update_time", "delete_time",
+}
 
 func init() {
 	sql.Register(d1.DriverName, &Driver{})
@@ -86,14 +94,14 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 		a[i] = v
 	}
 	var stmt = d1.ParameterizedStatement{SQL: s.Stmt, Params: a}
-	_, result, err := s.Conn.WriteParameterizedContext(context.Background(), stmt)
+	result, err := s.Conn.WriteParameterizedContext(context.Background(), stmt)
 	if err != nil {
-		d1.Trace("%s: Exec failed: %+v", s.Conn.ID, err)
+		d1.Trace("%s: Exec failed(AuditlogId=%s): %+v", s.Conn.ID, result.AuditlogId, err)
 		return nil, err
 	}
 
-	d1.Trace("%s: Exec OK: %+v", s.Conn.ID, result)
-	return &Result{result: result}, nil
+	d1.Trace("%s: Exec OK(AuditlogId=%s): %+v", s.Conn.ID, result.AuditlogId, result)
+	return &Result{&result}, nil
 }
 
 func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
@@ -102,78 +110,97 @@ func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
 		a[i] = v
 	}
 	var stmt = d1.ParameterizedStatement{SQL: s.Stmt, Params: a}
-	_, result, err := s.Conn.WriteParameterizedContext(context.Background(), stmt)
+	result, err := s.Conn.WriteParameterizedContext(context.Background(), stmt)
 	if err != nil {
 		d1.Trace("%s: Query failed: %+v", s.Conn.ID, err)
 		return nil, err
 	}
 	d1.Trace("%s: Query OK: %+v", s.Conn.ID, result)
 
-	var cols []string
-	var vals []interface{}
-	gjson.ParseBytes(result.Results[0]).ForEach(func(key, value gjson.Result) bool {
-		d1.Trace("key: %s, value: %s", key.String(), value.String())
-		cols = append(cols, key.String())
-		vals = append(vals, value.Value())
-		return true
-	})
-
-	return &Rows{connId: s.Conn.ID, result: result, cols: cols, vals: vals}, nil
+	return &Rows{connId: s.Conn.ID, results: &result.Result[0].Results}, nil
 }
 
 // Result implements the sql/driver.Result interface.
 var _ driver.Result = (*Result)(nil)
 
 type Result struct {
-	result *d1.D1RespQueryResult
+	*d1.D1Resp
 }
 
 func (r *Result) LastInsertId() (int64, error) {
-	return r.result.Meta.LastRowID, nil
+	return r.Result[0].Meta.LastRowID, nil
 }
 
 func (r *Result) RowsAffected() (int64, error) {
-	return r.result.Meta.Changes, nil
+	return r.Result[0].Meta.Changes, nil
 }
 
 // Rows implements the sql/driver.Rows interface.
 var _ driver.Rows = (*Rows)(nil)
 
 type Rows struct {
-	connId string
-	result *d1.D1RespQueryResult
-	cols   []string
-	vals   []interface{}
+	connId  string
+	results *d1.D1RespQueryResults
+	index   int
 }
 
 func (r *Rows) Columns() []string {
-	if r.result.Meta.RowsRead == 0 || len(r.result.Results) == 0 {
+	if len(r.results.Columns) == 0 {
 		return nil
 	}
-	d1.Trace("%s: Columns: %+v", r.connId, r.cols)
-	return r.cols
+
+	d1.Trace("%s: Columns: %+v", r.connId, r.results.Columns)
+	return r.results.Columns
 }
 
 func (r *Rows) Close() error {
 	return nil
 }
 
-func (r *Rows) Next(dest []driver.Value) error {
-	if len(r.cols) == 0 {
+func (r *Rows) Next(dest []driver.Value) (err error) {
+	if len(r.results.Rows) == 0 || r.index >= len(r.results.Rows) {
 		return io.EOF
 	}
+	var row = r.results.Rows[r.index]
+	r.index++
 	d1.Trace("%s: Next: dest(%d)=%#+v", r.connId, len(dest), dest)
-	d1.Trace("%s, Next: %+v, %+v", r.connId, r.cols, r.vals)
-	for i := range dest {
-		switch dest[i].(type) {
-		case *int64:
-			dest[i] = r.vals[i].(int64)
-		case *float64:
-			dest[i] = r.vals[i].(float64)
-		case *string:
-			dest[i] = r.vals[i].(string)
-		case *[]byte:
-			dest[i] = []byte(r.vals[i].(string))
+	d1.Trace("%s, Next: %+v, %+v", r.connId, r.results.Columns, row)
+	for i := range row {
+		switch row[i].(type) {
+		case bool:
+			dest[i] = row[i].(bool)
+		case time.Time:
+			dest[i] = row[i].(time.Time)
+		case float64:
+			fv := row[i].(float64)
+			if math.Trunc(fv) == fv {
+				dest[i] = int64(fv)
+			} else {
+				dest[i] = fv
+			}
+		case int64:
+			dest[i] = row[i].(int64)
+		case string:
+			sv := row[i].(string)
+			if slices.Contains(defaultTimeFields, strings.ToLower(r.results.Columns[i])) {
+				dest[i], err = time.Parse(time.RFC3339Nano, sv)
+				return
+			}
+
+			all := d1.IsFullyUnicodeEscaped(sv)
+			d1.Trace("Next string: %s, %t", sv, all)
+			if all {
+				bytes, err := d1.UnescapeUnicode(sv)
+				if err != nil {
+					return err
+				}
+				dest[i] = bytes
+			} else {
+				dest[i] = sv
+			}
+
+		case []byte:
+			dest[i] = []byte(row[i].(string))
 		default:
 			var err = errors.New("unsupported type")
 			return err

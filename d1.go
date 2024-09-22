@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"strings"
 	"time"
 )
@@ -55,7 +56,10 @@ func Trace(pattern string, args ...interface{}) {
 	for _, dlp := range dlpStrs {
 		msg = strings.Replace(msg, dlp, "*****", -1)
 	}
-	traceOut.Write([]byte(msg))
+	_, err := traceOut.Write([]byte(msg))
+	if err != nil {
+		log.Printf("Trace() failed: %s", err)
+	}
 }
 
 // TraceOn turns on tracing output to the io.Writer of your choice.

@@ -37,15 +37,6 @@ type D1RespResultInfo struct {
 	TotalCount int `json:"total_count"`
 }
 
-type D1RespDbListItem struct {
-	CreatedAt time.Time `json:"created_at"`
-	FileSize  int       `json:"file_size"`
-	Name      string    `json:"name"`
-	NumTables int       `json:"num_tables"`
-	UUID      string    `json:"uuid"`
-	Version   string    `json:"version"`
-}
-
 type D1RespQueryResultMeta struct {
 	ChangedDb   bool    `json:"changed_db"`
 	Changes     int64   `json:"changes"`
@@ -57,18 +48,23 @@ type D1RespQueryResultMeta struct {
 	SizeAfter   int64   `json:"size_after"`
 }
 
+type D1RespQueryResults struct {
+	Columns []string        `json:"columns"`
+	Rows    [][]interface{} `json:"rows"`
+}
+
 type D1RespQueryResult struct {
 	Meta    D1RespQueryResultMeta `json:"meta"`
-	Results []json.RawMessage     `json:"results"`
-	Success bool                  `json:"success"`
+	Results D1RespQueryResults    `json:"results"`
 }
 
 type D1Resp struct {
-	Errors     []D1RespError     `json:"errors"`
-	Messages   []D1RespMessage   `json:"messages"`
-	Result     *json.RawMessage  `json:"result"`
-	ResultInfo *D1RespResultInfo `json:"result_info"`
-	Success    bool              `json:"success"`
+	Errors     []D1RespError        `json:"errors"`
+	Messages   []D1RespMessage      `json:"messages"`
+	Result     []*D1RespQueryResult `json:"result"`
+	ResultInfo *D1RespResultInfo    `json:"result_info"`
+	Success    bool                 `json:"success"`
+	AuditlogId string               `json:"-"`
 }
 
 type ParameterizedStatement struct {
@@ -81,13 +77,13 @@ func (c *Connection) apiOpsToEndpoint(apiOps apiOps) string {
 	case api_LIST:
 		return "/d1/database"
 	case api_QUERY:
-		return "/d1/database/" + c.databaseId + "/query"
+		return "/d1/database/" + c.databaseId + "/raw"
 	default:
 		return ""
 	}
 }
 
-func (c *Connection) d1ApiCall(ctx context.Context, apiOps apiOps, method string, reqBody []byte) (respBody []byte, duration time.Duration, err error) {
+func (c *Connection) d1ApiCall(ctx context.Context, apiOps apiOps, method string, reqBody []byte) (respBody []byte, auditlogId string, duration time.Duration, err error) {
 	var endpoint = c.apiOpsToEndpoint(apiOps)
 	if endpoint == "" {
 		err = ErrInvalidAPI
@@ -114,6 +110,7 @@ func (c *Connection) d1ApiCall(ctx context.Context, apiOps apiOps, method string
 		Trace("%s: client.Do() failed: %s", c.ID, err)
 		return
 	}
+	auditlogId = resp.Header.Get("cf-auditlog-id")
 	duration = time.Since(start)
 	defer resp.Body.Close()
 
@@ -122,46 +119,53 @@ func (c *Connection) d1ApiCall(ctx context.Context, apiOps apiOps, method string
 		Trace("%s: ioutil.ReadAll() failed: %s", c.ID, err)
 		return
 	}
-	Trace("%s: ioutil.ReadAll() OK", c.ID)
 
-	// if resp.StatusCode != http.StatusOK {
-	// 	trace("%s: HTTP status code %d, body: %s", c.ID, resp.StatusCode, respBody)
-	// 	err = fmt.Errorf("HTTP status code %d", resp.StatusCode)
-	// 	return
-	// }
 	Trace("%s: client.Do(%s) OK, status: %d, body: %s", req.URL, c.ID, resp.StatusCode, respBody)
 
 	return
 }
 
-func (c *Connection) WriteParameterizedContext(ctx context.Context, stmt ParameterizedStatement) (resp D1Resp, result *D1RespQueryResult, err error) {
+func (c *Connection) WriteParameterizedContext(ctx context.Context, stmt ParameterizedStatement) (resp D1Resp, err error) {
 	if c.hasBeenClosed {
 		var errResult D1Resp
 		errResult.Success = false
 		errResult.Errors = append(errResult.Errors, D1RespError{Code: 0, Message: "Connection has been closed"})
-		return errResult, nil, ErrClosed
+		return errResult, ErrClosed
 	}
 
 	Trace("%s: Write() for %d statement args", c.ID, len(stmt.Params))
+
+	for idx, param := range stmt.Params {
+		Trace("%s: param[%d]: %v", c.ID, idx, param)
+		switch param := param.(type) {
+		case time.Time:
+			stmt.Params[idx] = param.Format(time.RFC3339Nano)
+		case []byte:
+			stmt.Params[idx] = BytesToUnicodeEscapes(param)
+		}
+	}
 
 	reqBody, err := json.Marshal(stmt)
 	if err != nil {
 		Trace("%s: reqBody json.Marshal() failed: %s", c.ID, err)
 		return
 	}
+	Trace("%s, reqBody: %s", c.ID, reqBody)
 
-	respBody, duration, err := c.d1ApiCall(ctx, api_QUERY, "POST", reqBody)
+	respBody, auditlogId, duration, err := c.d1ApiCall(ctx, api_QUERY, "POST", reqBody)
 	if err != nil {
 		Trace("%s: d1ApiCall() failed: %s, duration: %s", c.ID, err, duration)
 		return
 	}
 	Trace("%s: d1ApiCall() OK, duration: %s", c.ID, duration)
 
+	resp = D1Resp{}
 	err = json.Unmarshal(respBody, &resp)
 	if err != nil {
 		Trace("%s: resp json.Unmarshal() failed: %s", c.ID, err)
 		return
 	}
+	resp.AuditlogId = auditlogId
 	Trace("%s: resp json.Unmarshal() OK", c.ID)
 
 	if !resp.Success {
@@ -172,22 +176,6 @@ func (c *Connection) WriteParameterizedContext(ctx context.Context, stmt Paramet
 		err = errors.New(strings.Join(errs, "\n"))
 		Trace("%s: api call failed, err: %s, %+v", c.ID, err, resp)
 		return
-	}
-
-	if resp.Result != nil {
-		var results = []*D1RespQueryResult{}
-		err = json.Unmarshal(*resp.Result, &results)
-		if err != nil {
-			Trace("%s: result json.Unmarshal() failed: %s", c.ID, err)
-			return
-		}
-		if len(results) != 1 {
-			err = errors.New("result should have exactly one element")
-			Trace("%s: result should have exactly one element", c.ID)
-			return
-		}
-		result = results[0]
-		Trace("%s: result json.Unmarshal() OK", c.ID)
 	}
 
 	return
