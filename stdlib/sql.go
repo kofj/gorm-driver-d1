@@ -167,6 +167,8 @@ func (r *Rows) Next(dest []driver.Value) (err error) {
 	d1.Trace("%s, Next: %+v, %+v", r.connId, r.results.Columns, row)
 	for i := range row {
 		switch row[i].(type) {
+		case nil:
+			dest[i] = nil
 		case bool:
 			dest[i] = row[i].(bool)
 		case time.Time:
@@ -184,7 +186,11 @@ func (r *Rows) Next(dest []driver.Value) (err error) {
 			sv := row[i].(string)
 			if slices.Contains(defaultTimeFields, strings.ToLower(r.results.Columns[i])) {
 				dest[i], err = time.Parse(time.RFC3339Nano, sv)
-				return
+				if err != nil {
+					d1.Trace("Rows.Next parse time string failed: %s", err)
+					return err
+				}
+				continue
 			}
 
 			all := d1.IsFullyUnicodeEscaped(sv)
