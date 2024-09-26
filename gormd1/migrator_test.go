@@ -10,10 +10,10 @@ import (
 
 type User struct {
 	gorm.Model
-	ID     int
 	Name   string `gorm:"field:name"`
 	Age    int    `gorm:"field:age"`
 	Active bool
+	Wallet float64
 	Bin    []byte
 }
 
@@ -44,7 +44,7 @@ func TestMigrator(t *testing.T) {
 
 	var createdAt, updatedAt time.Time
 	t.Run("Create", func(t *testing.T) {
-		var user = &User{Name: "kofj", ID: 1, Age: 18, Active: true, Bin: bin1}
+		var user = &User{Name: "kofj", Age: 18, Active: true, Bin: bin1, Wallet: 100.08}
 		var err = gdb.Create(user).Error
 		if err != nil {
 			t.Errorf("failed to create record: %v", err)
@@ -66,6 +66,7 @@ func TestMigrator(t *testing.T) {
 		assert.Equalf(t, "kofj", user.Name, "user name")
 		assert.Equalf(t, bin1, user.Bin, "user bin not equal")
 		assert.Truef(t, user.Active, "active")
+		assert.Equal(t, 100.08, user.Wallet)
 		assert.Equalf(t, createdAt, user.CreatedAt, "CreatedAt not equal")
 		assert.Equalf(t, updatedAt, user.UpdatedAt, "UpdatedAt not equal")
 	})
@@ -83,7 +84,8 @@ func TestMigrator(t *testing.T) {
 		if tx.RowsAffected != 1 {
 			t.Errorf("expected RowsAffected to be 1; got %d", tx.RowsAffected)
 		}
-		var nuser = &User{ID: 1}
+		var nuser = &User{}
+		nuser.ID = 1
 		gdb.First(nuser)
 		assert.Equalf(t, "kofj1", nuser.Name, "user name")
 		assert.Equalf(t, bin2, nuser.Bin, "user bin not equal")
