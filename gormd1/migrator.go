@@ -284,7 +284,11 @@ func (m Migrator) RenameIndex(value interface{}, oldName, newName string) error 
 		var sql string
 		m.DB.Raw("SELECT sql FROM sqlite_master WHERE type = ? AND tbl_name = ? AND name = ?", "index", stmt.Table, oldName).Row().Scan(&sql)
 		if sql != "" {
-			return m.DB.Exec(strings.Replace(sql, oldName, newName, 1)).Error
+			var err = m.DB.Exec(strings.Replace(sql, oldName, newName, 1)).Error
+			if err != nil {
+				return err
+			}
+			return m.DB.Exec("DROP INDEX ?", clause.Column{Name: oldName}).Error
 		}
 		return fmt.Errorf("failed to find index with name %v", oldName)
 	})

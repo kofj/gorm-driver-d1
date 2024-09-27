@@ -10,7 +10,7 @@ import (
 
 type User struct {
 	gorm.Model
-	Name   string `gorm:"field:name"`
+	Name   string `gorm:"field:name;index:idx_name;unique"`
 	Age    int    `gorm:"field:age"`
 	Active bool
 	Wallet float64
@@ -32,6 +32,15 @@ func TestMigrator(t *testing.T) {
 		return
 	}
 
+	ok = t.Run("HasNoTable", func(t *testing.T) {
+		migrator := gdb.Migrator()
+		var result = migrator.HasTable("tab_not_exist")
+		assert.Falsef(t, result, "expect table not exist.")
+	})
+	if !ok {
+		return
+	}
+
 	ok = t.Run("HasTable", func(t *testing.T) {
 		migrator := gdb.Migrator()
 		if !migrator.HasTable(&User{}) {
@@ -41,6 +50,30 @@ func TestMigrator(t *testing.T) {
 	if !ok {
 		return
 	}
+
+	t.Run("HasColumn", func(t *testing.T) {
+		migrator := gdb.Migrator()
+		var result = migrator.HasColumn(&User{}, "name")
+		assert.Truef(t, result, "expect %v table exist name field.", &User{})
+	})
+
+	t.Run("HasIndex", func(t *testing.T) {
+		migrator := gdb.Migrator()
+		var result = migrator.HasIndex(&User{}, "idx_users_deleted_at")
+		assert.Truef(t, result, "expect %v table exist index idx_users_deleted_at.", &User{})
+		result = migrator.HasIndex(&User{}, "idx_name")
+		assert.Truef(t, result, "expect %v table exist index idx_name.", &User{})
+	})
+
+	t.Run("RenameIndex", func(t *testing.T) {
+		migrator := gdb.Migrator()
+		var err = migrator.RenameIndex(&User{}, "idx_name", "idx_users_name")
+		if err != nil {
+			t.Errorf("failed to rename index: %v", err)
+		}
+		var result = migrator.HasIndex(&User{}, "idx_users_name")
+		assert.Truef(t, result, "expect users table exist index idx_users_name.")
+	})
 
 	var createdAt, updatedAt time.Time
 	t.Run("Create", func(t *testing.T) {
