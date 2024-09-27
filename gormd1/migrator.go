@@ -6,7 +6,6 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/sirupsen/logrus"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 	"gorm.io/gorm/migrator"
@@ -23,8 +22,7 @@ type Migrator struct {
 
 var _ gorm.Migrator = &Migrator{}
 
-func (dialector Dialector) Migrator(db *gorm.DB) gorm.Migrator {
-	logrus.Info("call Migrator")
+func (dialector *Dialector) Migrator(db *gorm.DB) gorm.Migrator {
 	return Migrator{migrator.Migrator{Config: migrator.Config{
 		DB:                          db,
 		Dialector:                   dialector,
