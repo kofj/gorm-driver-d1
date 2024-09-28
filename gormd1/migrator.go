@@ -185,20 +185,57 @@ func (m Migrator) DropColumn(value interface{}, name string) error {
 	})
 }
 
-func (m Migrator) CreateConstraint(interface{}, string) error {
-	return ErrConstraintsNotImplemented
+func (m Migrator) CreateConstraint(value interface{}, name string) error {
+	return m.RunWithValue(value, func(stmt *gorm.Statement) error {
+		constraint, table := m.GuessConstraintInterfaceAndTable(stmt, name)
+
+		return m.recreateTable(value, &table,
+			func(ddl *ddl, stmt *gorm.Statement) (*ddl, []interface{}, error) {
+				var (
+					constraintName   string
+					constraintSql    string
+					constraintValues []interface{}
+				)
+
+				if constraint != nil {
+					constraintName = constraint.GetName()
+					constraintSql, constraintValues = constraint.Build()
+				} else {
+					return nil, nil, nil
+				}
+
+				ddl.addConstraint(constraintName, constraintSql)
+				return ddl, constraintValues, nil
+			})
+	})
 }
 
-func (m Migrator) DropConstraint(interface{}, string) error {
-	return ErrConstraintsNotImplemented
+func (m Migrator) DropConstraint(value interface{}, name string) error {
+	return m.RunWithValue(value, func(stmt *gorm.Statement) error {
+		constraint, table := m.GuessConstraintInterfaceAndTable(stmt, name)
+		if constraint != nil {
+			name = constraint.GetName()
+		}
+
+		return m.recreateTable(value, &table,
+			func(ddl *ddl, stmt *gorm.Statement) (*ddl, []interface{}, error) {
+				ddl.removeConstraint(name)
+				return ddl, nil, nil
+			})
+	})
 }
 
 func (m Migrator) HasConstraint(value interface{}, name string) bool {
 	var count int64
 	m.RunWithValue(value, func(stmt *gorm.Statement) error {
+		constraint, table := m.GuessConstraintInterfaceAndTable(stmt, name)
+		if constraint != nil {
+			name = constraint.GetName()
+		}
+
 		m.DB.Raw(
-			"SELECT count(*) FROM sqlite_master WHERE type = ? AND tbl_name = ? AND (sql LIKE ? OR sql LIKE ? OR sql LIKE ?)",
-			"table", stmt.Table, `%CONSTRAINT "`+name+`" %`, `%CONSTRAINT `+name+` %`, "%CONSTRAINT `"+name+"`%",
+			"SELECT count(*) FROM sqlite_master WHERE type = ? AND tbl_name = ? AND (sql LIKE ? OR sql LIKE ? OR sql LIKE ? OR sql LIKE ? OR sql LIKE ?)",
+			"table", table, `%CONSTRAINT "`+name+`" %`, `%CONSTRAINT `+name+` %`, "%CONSTRAINT `"+name+"`%", "%CONSTRAINT ["+name+"]%", "%CONSTRAINT \t"+name+"\t%",
 		).Row().Scan(&count)
 
 		return nil
@@ -299,5 +336,71 @@ func (m Migrator) DropIndex(value interface{}, name string) error {
 		}
 
 		return m.DB.Exec("DROP INDEX ?", clause.Column{Name: name}).Error
+	})
+}
+
+func (m Migrator) getRawDDL(table string) (string, error) {
+	var createSQL string
+	m.DB.Raw("SELECT sql FROM sqlite_master WHERE type = ? AND tbl_name = ? AND name = ?", "table", table, table).Row().Scan(&createSQL)
+
+	if m.DB.Error != nil {
+		return "", m.DB.Error
+	}
+	return createSQL, nil
+}
+
+func (m Migrator) recreateTable(
+	value interface{}, tablePtr *string,
+	getCreateSQL func(ddl *ddl, stmt *gorm.Statement) (sql *ddl, sqlArgs []interface{}, err error),
+) error {
+	return m.RunWithValue(value, func(stmt *gorm.Statement) error {
+		table := stmt.Table
+		if tablePtr != nil {
+			table = *tablePtr
+		}
+
+		rawDDL, err := m.getRawDDL(table)
+		if err != nil {
+			return err
+		}
+
+		originDDL, err := parseDDL(rawDDL)
+		if err != nil {
+			return err
+		}
+
+		createDDL, sqlArgs, err := getCreateSQL(originDDL.clone(), stmt)
+		if err != nil {
+			return err
+		}
+		if createDDL == nil {
+			return nil
+		}
+
+		newTableName := table + "__temp"
+		if err := createDDL.renameTable(newTableName, table); err != nil {
+			return err
+		}
+
+		columns := createDDL.getColumns()
+		createSQL := createDDL.compile()
+
+		return m.DB.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Exec(createSQL, sqlArgs...).Error; err != nil {
+				return err
+			}
+
+			queries := []string{
+				fmt.Sprintf("INSERT INTO `%v`(%v) SELECT %v FROM `%v`", newTableName, strings.Join(columns, ","), strings.Join(columns, ","), table),
+				fmt.Sprintf("DROP TABLE `%v`", table),
+				fmt.Sprintf("ALTER TABLE `%v` RENAME TO `%v`", newTableName, table),
+			}
+			for _, query := range queries {
+				if err := tx.Exec(query).Error; err != nil {
+					return err
+				}
+			}
+			return nil
+		})
 	})
 }
