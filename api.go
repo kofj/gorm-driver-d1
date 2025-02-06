@@ -80,7 +80,7 @@ func (c *Connection) apiOpsToEndpoint(apiOps apiOps, account string) string {
 	case api_QUERY:
 		return "/accounts/" + account + "/d1/database/" + c.databaseId + "/raw"
 	case API_TOKEN:
-		return "/user/tokens/verify"
+		return "/accounts/" + account + "/tokens/verify"
 	default:
 		return ""
 	}
